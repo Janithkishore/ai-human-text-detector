@@ -1,6 +1,8 @@
 import os
 from datetime import datetime
+from urllib.parse import quote_plus, urlsplit
 
+import pymysql
 import torch
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -12,7 +14,9 @@ load_dotenv()
 
 db = SQLAlchemy()
 
+
 class Detection(db.Model):
+    __tablename__ = "detection"
     id = db.Column(db.Integer, primary_key=True)
     text = db.Column(db.Text, nullable=False)
     label = db.Column(db.String(20), nullable=False)
@@ -20,10 +24,40 @@ class Detection(db.Model):
     human_probability = db.Column(db.Float, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
+
 MODEL_NAME = os.getenv("MODEL_NAME", "roberta-base-openai-detector")
 MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "12000"))
 tokenizer = None
 model = None
+
+
+def ensure_mysql_database():
+    """Create the MySQL database automatically if it does not exist."""
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url or not database_url.startswith("mysql+pymysql://"):
+        return
+
+    parsed = urlsplit(database_url.replace("mysql+pymysql://", "mysql://", 1))
+    database_name = parsed.path.lstrip("/")
+    if not database_name:
+        raise RuntimeError("DATABASE_URL must include a database name.")
+
+    connection = pymysql.connect(
+        host=parsed.hostname or "localhost",
+        port=parsed.port or 3306,
+        user=parsed.username or "root",
+        password=parsed.password or "",
+        charset="utf8mb4",
+        autocommit=True,
+    )
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"CREATE DATABASE IF NOT EXISTS `{database_name.replace('`', '``')}` "
+                "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+            )
+    finally:
+        connection.close()
 
 
 def load_detector():
@@ -41,7 +75,6 @@ def classify_text(text: str):
         logits = model(**inputs).logits
         probabilities = torch.softmax(logits, dim=-1)[0]
 
-    # The OpenAI RoBERTa detector uses labels 0=human, 1=AI.
     human_probability = float(probabilities[0])
     ai_probability = float(probabilities[1])
     label = "AI" if ai_probability >= human_probability else "Human"
@@ -49,18 +82,33 @@ def classify_text(text: str):
 
 
 app = Flask(__name__)
-app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL", "sqlite:///detector.db")
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "mysql+pymysql://root:password@localhost:3306/ai_text_detector",
+)
+
+# If MySQL is configured, create the database before SQLAlchemy connects to it.
+ensure_mysql_database()
+
+app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db.init_app(app)
 CORS(app, resources={r"/api/*": {"origins": os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")}})
 
+# Automatically creates/updates the application's tables on startup.
 with app.app_context():
     db.create_all()
 
 
 @app.get("/api/health")
 def health():
-    return jsonify({"status": "ok", "model": MODEL_NAME})
+    try:
+        db.session.execute(db.text("SELECT 1"))
+        database_status = "connected"
+    except Exception:
+        database_status = "disconnected"
+    return jsonify({"status": "ok", "database": database_status, "model": MODEL_NAME})
 
 
 @app.post("/api/detect")
