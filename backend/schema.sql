@@ -1,0 +1,11 @@
+CREATE DATABASE IF NOT EXISTS ai_text_detector;
+USE ai_text_detector;
+
+CREATE TABLE IF NOT EXISTS detection (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  text TEXT NOT NULL,
+  label VARCHAR(20) NOT NULL,
+  ai_probability FLOAT NOT NULL,
+  human_probability FLOAT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
